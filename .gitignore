@@ -32,3 +32,7 @@ test-results/
 *.sqlite3-shm
 *.sqlite3-journal
 !*.traineddata.gz
+
+# ParquetLab 实验产物
+artifacts/
+.pytest_cache/

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parquet 数据文件优化实验室</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="viz-root">
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">▦</span>
+    <div>
+      <h1>Parquet 数据文件优化实验室</h1>
+      <p class="subtitle">同一份明细 · 压缩 × 字典编码 × 行组大小 × 排序 的可复现对比</p>
+    </div>
+  </div>
+  <div class="topbar-meta" id="engineMeta"></div>
+</header>
+
+<main>
+<!-- ============ 配置面板 ============ -->
+<section class="card" id="configCard">
+  <div class="card-head">
+    <h2>① 实验配置</h2>
+    <span class="hint">每项结果都会记录输入指纹与完整参数，可原样重跑</span>
+  </div>
+
+  <div class="form-grid">
+    <fieldset>
+      <legend>输入数据（本地生成器）</legend>
+      <label>行数
+        <input type="number" id="dsRows" value="200000" min="1000" step="1000">
+      </label>
+      <label>随机种子
+        <input type="number" id="dsSeed" value="20261114">
+      </label>
+      <label>region 空值率
+        <input type="number" id="nullRegion" value="0.08" min="0" max="1" step="0.01">
+      </label>
+      <label>remark 空值率
+        <input type="number" id="nullRemark" value="0.15" min="0" max="1" step="0.01">
+      </label>
+      <label>event_time 空值率
+        <input type="number" id="nullEvent" value="0.05" min="0" max="1" step="0.01">
+      </label>
+      <p class="micro">样本含高重复类别、近唯一标识、Decimal(18,2) 定点金额、
+        double、长文本、微秒时间戳、布尔与空值列。</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>压缩算法</legend>
+      <div class="check-grid" id="compressionBox"></div>
+      <legend class="mt">行组大小（行数，0 = pyarrow 默认单组）</legend>
+      <div class="check-grid" id="rowGroupBox"></div>
+      <legend class="mt">编码 profile</legend>
+      <div class="check-grid" id="profileBox"></div>
+      <label class="inline mt">
+        <input type="checkbox" id="addSorted" checked>
+        加入排序对照方案（记录排序耗时）
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>查询基准（可增删、改字段/范围/重复次数）</legend>
+      <div id="queryList"></div>
+      <div class="row-actions">
+        <button class="btn ghost" id="addQuery" type="button">＋ 添加查询</button>
+      </div>
+      <p class="micro">每次查询独立重新打开文件；先预热 1 次不计入，
+        正式重复执行并展示全部原始耗时与<strong>中位数</strong>。</p>
+    </fieldset>
+  </div>
+
+  <div class="run-bar">
+    <button class="btn primary" id="runBtn" type="button">开始实验</button>
+    <span id="runStatus" class="run-status"></span>
+  </div>
+</section>
+
+<!-- ============ 血缘与核对 ============ -->
+<section class="card hidden" id="lineageCard">
+  <div class="card-head"><h2>② 输入数据与语义核对</h2></div>
+  <div id="lineageBody"></div>
+</section>
+
+<!-- ============ 推荐 ============ -->
+<section class="card hidden" id="recoCard">
+  <div class="card-head">
+    <h2>③ 推荐方案</h2>
+    <span class="hint">失败/核对未通过方案不参与推荐；结论取中位数，不看单次最快</span>
+  </div>
+  <div id="recoBody" class="reco-grid"></div>
+</section>
+
+<!-- ============ 图表 ============ -->
+<section class="card hidden" id="chartCard">
+  <div class="card-head">
+    <h2>④ 方案对比</h2>
+    <div class="seg" id="metricSeg">
+      <button data-metric="file_size_bytes" class="active">文件大小</button>
+      <button data-metric="write_ms">写入耗时</button>
+      <button data-metric="qpoint">点查中位</button>
+      <button data-metric="qrange">范围聚合中位</button>
+      <button data-metric="qscan">文本扫描中位</button>
+    </div>
+  </div>
+  <div id="barChart" class="chart"></div>
+  <p class="micro" id="chartNote"></p>
+</section>
+
+<!-- ============ 明细表 ============ -->
+<section class="card hidden" id="tableCard">
+  <div class="card-head">
+    <h2>⑤ 全部方案明细</h2>
+    <div class="table-tools">
+      <input type="search" id="tableFilter" placeholder="按方案名过滤…">
+      <label class="inline"><input type="checkbox" id="showFailed" checked> 显示失败方案</label>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table id="schemeTable">
+      <thead><tr id="schemeHead"></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ 列编码抽屉 ============ -->
+<div class="drawer-mask hidden" id="drawerMask"></div>
+<aside class="drawer hidden" id="drawer" aria-label="列编码详情">
+  <div class="drawer-head">
+    <h3 id="drawerTitle">列编码详情</h3>
+    <button class="btn ghost" id="drawerClose" type="button">关闭 ✕</button>
+  </div>
+  <div id="drawerBody"></div>
+</aside>
+
+<!-- ============ 失败原因弹窗 ============ -->
+<div class="modal-mask hidden" id="modalMask">
+  <div class="modal">
+    <h3 id="modalTitle">方案失败原因</h3>
+    <pre id="modalBody"></pre>
+    <div class="row-actions right">
+      <button class="btn" id="modalClose" type="button">知道了</button>
+    </div>
+  </div>
+</div>
+
+<footer class="foot">
+  <span>ParquetLab · pyarrow 引擎本地运行 · 所有耗时单位毫秒，大小单位字节</span>
+</footer>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
